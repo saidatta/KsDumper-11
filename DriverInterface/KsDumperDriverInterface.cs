@@ -126,6 +126,152 @@ namespace KsDumper11.Driver
             return false;
         }
 
+        /// <summary>
+        /// Get PEB address for target process using kernel driver
+        /// </summary>
+        public ulong GetProcessPEB(int targetProcessId)
+        {
+            if (driverHandle == WinApi.INVALID_HANDLE_VALUE)
+                return 0;
+
+            var operation = new Operations.KERNEL_GET_PEB_OPERATION
+            {
+                targetProcessId = targetProcessId,
+                pebAddress = 0,
+                status = 0
+            };
+
+            int operationSize = Marshal.SizeOf<Operations.KERNEL_GET_PEB_OPERATION>();
+            IntPtr operationPtr = Marshal.AllocHGlobal(operationSize);
+
+            try
+            {
+                Marshal.StructureToPtr(operation, operationPtr, false);
+
+                bool success = WinApi.DeviceIoControl(
+                    driverHandle,
+                    Operations.IO_GET_PROCESS_PEB,
+                    operationPtr,
+                    operationSize,
+                    operationPtr,
+                    operationSize,
+                    IntPtr.Zero,
+                    IntPtr.Zero);
+
+                if (success)
+                {
+                    var result = Marshal.PtrToStructure<Operations.KERNEL_GET_PEB_OPERATION>(operationPtr);
+                    if (result.status == 0) // STATUS_SUCCESS
+                    {
+                        return result.pebAddress;
+                    }
+                }
+
+                return 0;
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(operationPtr);
+            }
+        }
+
+        /// <summary>
+        /// Get modules using clean separate input/output structures
+        /// </summary>
+        public Operations.KERNEL_MODULE_INFO[] GetProcessModules(int targetProcessId)
+        {
+            if (driverHandle == WinApi.INVALID_HANDLE_VALUE)
+                return new Operations.KERNEL_MODULE_INFO[0];
+
+            try
+            {
+                const int maxModules = 1000;
+
+                // FIXED: Clean separate input structure
+                var input = new Operations.KERNEL_GET_MODULES_INPUT
+                {
+                    targetProcessId = targetProcessId,
+                    maxModules = maxModules
+                };
+
+                int inputSize = Marshal.SizeOf<Operations.KERNEL_GET_MODULES_INPUT>();
+                int outputHeaderSize = Marshal.SizeOf<Operations.KERNEL_GET_MODULES_OUTPUT>();
+                int moduleSize = Marshal.SizeOf<Operations.KERNEL_MODULE_INFO>();
+                int outputBufferSize = outputHeaderSize + (maxModules * moduleSize);
+
+                // Allocate buffers
+                byte[] inputBuffer = new byte[inputSize];
+                byte[] outputBuffer = new byte[outputBufferSize];
+
+                // Marshal input structure
+                IntPtr inputPtr = Marshal.AllocHGlobal(inputSize);
+                try
+                {
+                    Marshal.StructureToPtr(input, inputPtr, false);
+                    Marshal.Copy(inputPtr, inputBuffer, 0, inputSize);
+
+                    bool success = WinApi.DeviceIoControl(
+                        driverHandle,
+                        Operations.IO_GET_PROCESS_MODULES,
+                        inputBuffer,
+                        inputSize,
+                        outputBuffer,
+                        outputBufferSize,
+                        out int bytesReturned,
+                        IntPtr.Zero);
+
+                    if (success && bytesReturned >= outputHeaderSize)
+                    {
+                        // Extract output header
+                        IntPtr outputHeaderPtr = Marshal.AllocHGlobal(outputHeaderSize);
+                        try
+                        {
+                            Marshal.Copy(outputBuffer, 0, outputHeaderPtr, outputHeaderSize);
+                            var outputHeader = Marshal.PtrToStructure<Operations.KERNEL_GET_MODULES_OUTPUT>(outputHeaderPtr);
+
+                            if (outputHeader.status == 0 && outputHeader.moduleCount > 0) // STATUS_SUCCESS
+                            {
+                                var modules = new Operations.KERNEL_MODULE_INFO[outputHeader.moduleCount];
+
+                                // Extract modules from output buffer (after header)
+                                for (int i = 0; i < outputHeader.moduleCount; i++)
+                                {
+                                    IntPtr modulePtr = Marshal.AllocHGlobal(moduleSize);
+                                    try
+                                    {
+                                        int moduleOffset = outputHeaderSize + (i * moduleSize);
+                                        Marshal.Copy(outputBuffer, moduleOffset, modulePtr, moduleSize);
+                                        modules[i] = Marshal.PtrToStructure<Operations.KERNEL_MODULE_INFO>(modulePtr);
+                                    }
+                                    finally
+                                    {
+                                        Marshal.FreeHGlobal(modulePtr);
+                                    }
+                                }
+
+                                return modules;
+                            }
+                        }
+                        finally
+                        {
+                            Marshal.FreeHGlobal(outputHeaderPtr);
+                        }
+                    }
+
+                    return new Operations.KERNEL_MODULE_INFO[0];
+                }
+                finally
+                {
+                    Marshal.FreeHGlobal(inputPtr);
+                }
+            }
+            catch (Exception ex)
+            {
+                // Log error but don't crash
+                return new Operations.KERNEL_MODULE_INFO[0];
+            }
+        }
+
         private readonly IntPtr driverHandle;
 
         public void Dispose()

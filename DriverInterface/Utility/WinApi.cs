@@ -16,6 +16,21 @@ namespace KsDumper11.Utility
 		[DllImport("kernel32.dll", CharSet = CharSet.Auto, ExactSpelling = true, SetLastError = true)]
 		public static extern bool DeviceIoControl(IntPtr hDevice, uint dwIoControlCode, IntPtr lpInBuffer, int nInBufferSize, IntPtr lpOutBuffer, int nOutBufferSize, IntPtr lpBytesReturned, IntPtr lpOverlapped);
 
+		[DllImport("kernel32.dll", CharSet = CharSet.Auto, ExactSpelling = true, SetLastError = true)]
+		public static extern bool DeviceIoControl(IntPtr hDevice, uint dwIoControlCode, byte[] lpInBuffer, int nInBufferSize, byte[] lpOutBuffer, int nOutBufferSize, out int lpBytesReturned, IntPtr lpOverlapped);
+
+		[DllImport("kernel32.dll", SetLastError = true)]
+		public static extern IntPtr VirtualAlloc(IntPtr lpAddress, uint dwSize, uint flAllocationType, uint flProtect);
+
+		[DllImport("kernel32.dll", SetLastError = true)]
+		public static extern bool VirtualFree(IntPtr lpAddress, uint dwSize, uint dwFreeType);
+
+		[DllImport("kernel32.dll", SetLastError = true)]
+		public static extern bool VirtualLock(IntPtr lpAddress, uint dwSize);
+
+		[DllImport("kernel32.dll", SetLastError = true)]
+		public static extern bool VirtualUnlock(IntPtr lpAddress, uint dwSize);
+
 		[DllImport("kernel32.dll")]
 		public static extern int GetLongPathName(string path, StringBuilder pszPath, int cchPath);
 
@@ -26,6 +41,12 @@ namespace KsDumper11.Utility
 		public static readonly int FILE_ANY_ACCESS = 0;
 
 		public static readonly IntPtr INVALID_HANDLE_VALUE = new IntPtr(-1);
+
+		// Memory allocation constants
+		public const uint MEM_COMMIT = 0x1000;
+		public const uint MEM_RESERVE = 0x2000;
+		public const uint MEM_RELEASE = 0x8000;
+		public const uint PAGE_READWRITE = 0x04;
 
 
     }
