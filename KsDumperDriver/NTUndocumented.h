@@ -1,6 +1,10 @@
 #pragma once
 #include <ntddk.h>
 
+// Forward declare PEB so we can use PPEB without full definition
+typedef struct _PEB PEB, *PPEB;
+
+
 typedef struct _KAPC_STATE {
 	LIST_ENTRY ApcListHead[MaximumMode];
 	struct _KPROCESS *Process;
@@ -44,6 +48,11 @@ NTKERNELAPI NTSTATUS NTAPI MmCopyVirtualMemory(IN PEPROCESS FromProcess, IN PVOI
 
 NTSYSAPI NTSTATUS NTAPI ZwQuerySystemInformation(IN SYSTEM_INFORMATION_CLASS SystemInformationClass, OUT PVOID SystemInformation, IN ULONG SystemInformationLength, OUT PULONG ReturnLength OPTIONAL);
 NTSYSAPI NTSTATUS NTAPI ZwQueryVirtualMemory(IN HANDLE ProcessHandle, IN PVOID BaseAddress, IN MEMORY_INFORMATION_CLASS MemoryInformationClass, OUT PVOID MemoryInformation, IN SIZE_T MemoryInformationLength, OUT PSIZE_T ReturnLength OPTIONAL);
+
+// Some WDKs don't expose these prototypes by default
+NTKERNELAPI PVOID PsGetProcessWow64Process(IN PEPROCESS Process);
+NTKERNELAPI HANDLE PsGetCurrentProcessId(VOID);
+
 
 NTKERNELAPI NTSTATUS PsLookupProcessByProcessId(IN HANDLE ProcessId, OUT PEPROCESS *Process);
 NTKERNELAPI PVOID PsGetProcessSectionBaseAddress(__in PEPROCESS Process);

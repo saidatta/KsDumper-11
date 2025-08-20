@@ -9,6 +9,9 @@ DRIVER_INITIALIZE DriverEntry;
 UNICODE_STRING deviceName, symLink;
 PDEVICE_OBJECT deviceObject;
 
+// Forward declare to avoid implicit declaration when used before definition
+NTSTATUS GetProcessModules(INT32 targetProcessId, PKERNEL_MODULE_INFO modules, INT32 maxModules, INT32* moduleCount);
+
 NTSTATUS CopyVirtualMemory(PEPROCESS targetProcess, PVOID sourceAddress, PVOID targetAddress, SIZE_T size)
 {
 	PSIZE_T readBytes;
@@ -32,16 +35,16 @@ NTSTATUS InitializeSystemModuleCache()
 
 NTSTATUS FindUserModeProcessForCaching(HANDLE* processId)
 {
-	// FIXED: Find a proper user-mode process for caching system modules
+	// Find a proper user-mode process for caching system modules
 	// Don't use PID 4 (System) - it has no user-mode modules
 
-	// Try common user-mode system processes
+	// Use current process ID via kernel API
 	HANDLE candidateProcesses[] = {
-		(HANDLE)ULongToHandle(GetCurrentProcessId()), // Current process if user-mode
+		PsGetCurrentProcessId(),
 		// Could add logic to find csrss.exe, winlogon.exe, etc.
 	};
 
-	for (int i = 0; i < sizeof(candidateProcesses) / sizeof(HANDLE); i++)
+	for (int i = 0; i < (int)(sizeof(candidateProcesses) / sizeof(HANDLE)); i++)
 	{
 		PEPROCESS process;
 		NTSTATUS status = PsLookupProcessByProcessId(candidateProcesses[i], &process);
@@ -141,11 +144,12 @@ NTSTATUS GetProcessModules(INT32 targetProcessId, PKERNEL_MODULE_INFO modules, I
 
 	__try
 	{
-		// CRITICAL: Probe user-mode memory before access
-		ProbeForRead(peb, sizeof(PEB), sizeof(ULONG_PTR));
+		// CRITICAL: Probe user-mode memory before access (use PEB64 minimal size we rely on)
+		ProbeForRead(peb, sizeof(PEB64), sizeof(ULONG_PTR));
 
-		// Access PEB_LDR_DATA with proper validation
-		PPEB_LDR_DATA ldr = peb->Ldr;
+		// Access PEB_LDR_DATA with proper validation via PEB64 view
+		PPEB64 peb64 = (PPEB64)peb;
+		PPEB_LDR_DATA ldr = peb64->Ldr;
 		if (ldr == NULL)
 		{
 			status = STATUS_NOT_FOUND;
@@ -333,7 +337,13 @@ NTSTATUS IoControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 	}
 	else if (controlCode == IO_GET_PROCESS_PEB)
 	{
-		if (inputBufferLength >= sizeof(KERNEL_GET_PEB_OPERATION))
+		// For METHOD_BUFFERED: both input and output are Irp->AssociatedIrp.SystemBuffer
+		ULONG inputBufferLength = stack->Parameters.DeviceIoControl.InputBufferLength;
+		ULONG outputBufferLength = stack->Parameters.DeviceIoControl.OutputBufferLength;
+		PVOID inputBuffer = Irp->AssociatedIrp.SystemBuffer;
+		PVOID outputBuffer = Irp->AssociatedIrp.SystemBuffer;
+
+		if (inputBufferLength >= sizeof(KERNEL_GET_PEB_OPERATION) && outputBufferLength >= sizeof(KERNEL_GET_PEB_OPERATION))
 		{
 			PKERNEL_GET_PEB_OPERATION operation = (PKERNEL_GET_PEB_OPERATION)inputBuffer;
 			operation->status = GetProcessPEB(operation->targetProcessId, &operation->pebAddress);
@@ -348,7 +358,13 @@ NTSTATUS IoControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 	}
 	else if (controlCode == IO_GET_PROCESS_MODULES)
 	{
-		// FIXED: Clean separate input/output structures
+		// For METHOD_BUFFERED: both input and output are Irp->AssociatedIrp.SystemBuffer
+		ULONG inputBufferLength = stack->Parameters.DeviceIoControl.InputBufferLength;
+		ULONG outputBufferLength = stack->Parameters.DeviceIoControl.OutputBufferLength;
+		PVOID inputBuffer = Irp->AssociatedIrp.SystemBuffer;
+		PVOID outputBuffer = Irp->AssociatedIrp.SystemBuffer;
+
+		// Separate input/output structures in the same buffer
 		if (inputBufferLength >= sizeof(KERNEL_GET_MODULES_INPUT) &&
 			outputBufferLength >= FIELD_OFFSET(KERNEL_GET_MODULES_OUTPUT, modules))
 		{
@@ -357,7 +373,7 @@ NTSTATUS IoControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 
 			// Calculate max modules that fit in output buffer
 			INT32 maxModules = min(input->maxModules,
-				(outputBufferLength - FIELD_OFFSET(KERNEL_GET_MODULES_OUTPUT, modules)) / sizeof(KERNEL_MODULE_INFO));
+				(INT32)((outputBufferLength - FIELD_OFFSET(KERNEL_GET_MODULES_OUTPUT, modules)) / sizeof(KERNEL_MODULE_INFO)));
 
 			if (maxModules > 1000) maxModules = 1000; // Safety limit
 
