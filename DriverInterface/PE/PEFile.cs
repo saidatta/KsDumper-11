@@ -8,7 +8,7 @@ namespace KsDumper11.PE
     {
         public PEType Type { get; protected set; }
 
-        public PESection[] Sections { get; protected set; }
+        public PESection[] Sections { get; set; }
 
 
         public abstract int GetFirstSectionHeaderOffset();

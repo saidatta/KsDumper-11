@@ -96,6 +96,9 @@
       <DataExecutionPrevention>true</DataExecutionPrevention>
       <Profile>false</Profile>
     </Link>
+    <DriverSign>
+      <FileDigestAlgorithm>sha256</FileDigestAlgorithm>
+    </DriverSign>
   </ItemDefinitionGroup>
   <ItemGroup>
     <FilesToPackage Include="$(TargetPath)" />

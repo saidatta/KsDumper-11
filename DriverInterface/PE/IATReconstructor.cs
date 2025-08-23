@@ -5,6 +5,7 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using KsDumper11.Driver;
+using KsDumper11.Utility;
 using static KsDumper11.PE.NativePEStructs;
 
 namespace KsDumper11.PE
@@ -711,7 +712,7 @@ namespace KsDumper11.PE
                 // Common address ranges where system modules are typically loaded
                 var commonRanges = new[]
                 {
-                    new { Start = 0x7FF800000000UL, End = 0x7FFFFFFFFFFF UL }, // System modules on x64
+                    new { Start = 0x7FF800000000UL, End = 0x7FFFFFFFFFFFFFFFUL }, // System modules on x64
                     new { Start = 0x70000000UL, End = 0x80000000UL }          // System modules on x32
                 };
 
@@ -753,7 +754,7 @@ namespace KsDumper11.PE
                     Marshal.SizeOf<IMAGE_DOS_HEADER>());
                 if (dosHeaderData == null) return false;
 
-                var dosHeader = BytesToStruct<IMAGE_DOS_HEADER>(dosHeaderData);
+                var dosHeader = ReadStruct<IMAGE_DOS_HEADER>(dosHeaderData, 0);
                 if (!dosHeader.IsValid) return false;
 
                 // Read NT header
@@ -881,7 +882,7 @@ namespace KsDumper11.PE
 
             for (int i = 0; i < fileHeader.NumberOfSections; i++)
             {
-                var sectionHeader = ReadStruct<IMAGE_SECTION_HEADER>(peData, 
+                var sectionHeader = ReadStruct<IMAGE_SECTION_HEADER>(peData,
                     sectionHeaderOffset + i * Marshal.SizeOf<IMAGE_SECTION_HEADER>());
 
                 // Focus on sections that typically contain IAT
@@ -912,14 +913,14 @@ namespace KsDumper11.PE
             string name = section.SectionName.ToLowerInvariant();
 
             // Writable sections (IAT needs to be writable)
-            bool isWritable = (characteristics & DataSectionFlags.MemoryWrite) != 0;
+            bool isWritable = ((DataSectionFlags)characteristics & DataSectionFlags.MemoryWrite) != 0;
 
             // Common IAT section names
-            bool isIATSection = name.Contains("data") || name.Contains("idata") || 
+            bool isIATSection = name.Contains("data") || name.Contains("idata") ||
                                name.Contains("rdata") || name.Contains("import");
 
             // Readable sections that might contain imports
-            bool isReadable = (characteristics & DataSectionFlags.MemoryRead) != 0;
+            bool isReadable = ((DataSectionFlags)characteristics & DataSectionFlags.MemoryRead) != 0;
 
             return isWritable || (isReadable && isIATSection);
         }
@@ -979,7 +980,7 @@ namespace KsDumper11.PE
                     Marshal.SizeOf<IMAGE_DOS_HEADER>());
                 if (dosHeaderData == null) return null;
 
-                var dosHeader = BytesToStruct<IMAGE_DOS_HEADER>(dosHeaderData);
+                var dosHeader = ReadStruct<IMAGE_DOS_HEADER>(dosHeaderData, 0);
                 if (!dosHeader.IsValid) return null;
 
                 // Read NT headers to get image size
@@ -988,8 +989,8 @@ namespace KsDumper11.PE
                 if (ntHeaderData == null) return null;
 
                 // Determine if 32-bit or 64-bit
-                var ntHeaders64 = BytesToStruct<IMAGE_NT_HEADERS64>(ntHeaderData);
-                var ntHeaders32 = BytesToStruct<IMAGE_NT_HEADERS32>(ntHeaderData);
+                var ntHeaders64 = ReadStruct<IMAGE_NT_HEADERS64>(ntHeaderData, 0);
+                var ntHeaders32 = ReadStruct<IMAGE_NT_HEADERS32>(ntHeaderData, 0);
 
                 uint imageSize = 0;
                 if (ntHeaders64.OptionalHeader.Magic == 0x20b) // PE32+
@@ -1029,7 +1030,7 @@ namespace KsDumper11.PE
         {
             try
             {
-                var dosHeader = BytesToStruct<IMAGE_DOS_HEADER>(moduleData);
+                var dosHeader = ReadStruct<IMAGE_DOS_HEADER>(moduleData, 0);
                 if (!dosHeader.IsValid) return 0;
 
                 // Get NT headers
@@ -1043,12 +1044,12 @@ namespace KsDumper11.PE
 
                 if (magic == 0x20b) // PE32+
                 {
-                    var ntHeaders = BytesToStruct<IMAGE_NT_HEADERS64>(moduleData, ntHeaderOffset);
+                    var ntHeaders = ReadStruct<IMAGE_NT_HEADERS64>(moduleData, ntHeaderOffset);
                     exportDir = ntHeaders.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
                 }
                 else if (magic == 0x10b) // PE32
                 {
-                    var ntHeaders = BytesToStruct<IMAGE_NT_HEADERS32>(moduleData, ntHeaderOffset);
+                    var ntHeaders = ReadStruct<IMAGE_NT_HEADERS32>(moduleData, ntHeaderOffset);
                     exportDir = ntHeaders.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
                 }
                 else
@@ -1063,7 +1064,7 @@ namespace KsDumper11.PE
                 uint exportTableOffset = RVAToFileOffset(moduleData, exportDir.VirtualAddress);
                 if (exportTableOffset == 0) return 0;
 
-                var exportTable = BytesToStruct<IMAGE_EXPORT_DIRECTORY>(moduleData, (int)exportTableOffset);
+                var exportTable = ReadStruct<IMAGE_EXPORT_DIRECTORY>(moduleData, (int)exportTableOffset);
                 if (exportTable.NumberOfFunctions == 0) return 0;
 
                 return ParseExportArrays(moduleData, module, exportTable);
@@ -1100,6 +1101,9 @@ namespace KsDumper11.PE
                     functionRVAs[i] = BitConverter.ToUInt32(functionsData, i * 4);
                 }
 
+                // Will hold ordinal indices array for use outside the block below
+                byte[] ordinalsData = null;
+
                 // Process named exports
                 if (exportTable.NumberOfNames > 0)
                 {
@@ -1110,7 +1114,7 @@ namespace KsDumper11.PE
 
                     // Read ordinal indices
                     if (!TryReadFromRVA(moduleData, exportTable.AddressOfNameOrdinals,
-                        (int)(exportTable.NumberOfNames * 2), out byte[] ordinalsData))
+                        (int)(exportTable.NumberOfNames * 2), out ordinalsData))
                         return exportCount;
 
                     for (int i = 0; i < exportTable.NumberOfNames; i++)
@@ -1363,7 +1367,7 @@ namespace KsDumper11.PE
                 // Process named exports
                 for (int i = 0; i < exportTable.NumberOfNames; i++)
                 {
-                    uint nameRVA = Marshal.ReadInt32(namesPtr + i * 4);
+                    uint nameRVA = unchecked((uint)Marshal.ReadInt32(namesPtr + i * 4));
                     ushort ordinalIndex = (ushort)Marshal.ReadInt16(ordinalsPtr + i * 2);
                     uint functionRVA = (uint)Marshal.ReadInt32(functionsPtr + ordinalIndex * 4);
 
@@ -1969,210 +1973,14 @@ namespace KsDumper11.PE
             return 0;
         }
 
-        private uint CalculateImportDirectorySize(IEnumerable<IGrouping<string, ImportEntry>> moduleGroups, bool is64Bit)
-        {
-            uint size = 0;
 
-            // Import descriptors (one per module + null terminator)
-            size += (uint)((moduleGroups.Count() + 1) * Marshal.SizeOf<IMAGE_IMPORT_DESCRIPTOR>());
 
-            // Module names
-            foreach (var group in moduleGroups)
-            {
-                size += (uint)(group.First().ModuleName.Length + 1);
-            }
 
-            // Import Name Tables and Import By Name structures
-            foreach (var group in moduleGroups)
-            {
-                // Thunk array
-                size += (uint)((group.Count() + 1) * (is64Bit ? 8 : 4));
 
-                // Import By Name structures for named imports
-                foreach (var import in group.Where(i => !i.IsOrdinalOnly))
-                {
-                    size += (uint)(2 + import.FunctionName.Length + 1); // WORD hint + name + null
-                }
-            }
 
-            // Align to 4-byte boundary
-            return (size + 3) & ~3u;
-        }
 
-        private uint FindSpaceForImportDirectory(byte[] peData, uint requiredSize)
-        {
-            // Simple approach: expand the last section
-            // In a full implementation, you'd want more sophisticated space finding
 
-            var dosHeader = ReadStruct<IMAGE_DOS_HEADER>(peData, 0);
-            if (!dosHeader.IsValid) return 0;
 
-            int ntHeaderOffset = dosHeader.e_lfanew;
-            var fileHeader = ReadStruct<IMAGE_FILE_HEADER>(peData, ntHeaderOffset + 4);
-
-            if (fileHeader.NumberOfSections == 0) return 0;
-
-            // Get last section
-            int lastSectionOffset = ntHeaderOffset + 4 + Marshal.SizeOf<IMAGE_FILE_HEADER>() +
-                                   fileHeader.SizeOfOptionalHeader +
-                                   (fileHeader.NumberOfSections - 1) * Marshal.SizeOf<IMAGE_SECTION_HEADER>();
-
-            var lastSection = ReadStruct<IMAGE_SECTION_HEADER>(peData, lastSectionOffset);
-
-            // Return RVA at end of last section
-            return lastSection.VirtualAddress + lastSection.VirtualSize;
-        }
-
-        private byte[] BuildImportDirectoryData(IEnumerable<IGrouping<string, ImportEntry>> moduleGroups, uint baseRVA, bool is64Bit)
-        {
-            using (var stream = new MemoryStream())
-            using (var writer = new BinaryWriter(stream))
-            {
-                uint currentRVA = baseRVA;
-
-                // Reserve space for import descriptors
-                uint descriptorTableSize = (uint)((moduleGroups.Count() + 1) * Marshal.SizeOf<IMAGE_IMPORT_DESCRIPTOR>());
-                currentRVA += descriptorTableSize;
-
-                // Write import descriptors (placeholder for now)
-                foreach (var group in moduleGroups)
-                {
-                    writer.Write((uint)0); // OriginalFirstThunk - will be filled later
-                    writer.Write((uint)0); // TimeDateStamp
-                    writer.Write((uint)0); // ForwarderChain
-                    writer.Write((uint)0); // Name - will be filled later
-                    writer.Write(group.First().RVA); // FirstThunk (existing IAT location)
-                }
-
-                // Null terminator descriptor
-                writer.Write(new byte[Marshal.SizeOf<IMAGE_IMPORT_DESCRIPTOR>()]);
-
-                // TODO: Write module names, import name tables, and import by name structures
-                // This is a simplified version - full implementation would complete the import directory
-
-                return stream.ToArray();
-            }
-        }
-
-        private void WriteImportDirectoryToPE(byte[] peData, byte[] importData, uint importDirRVA, bool is64Bit)
-        {
-            // Update PE headers to point to new import directory
-            var dosHeader = ReadStruct<IMAGE_DOS_HEADER>(peData, 0);
-            int ntHeaderOffset = dosHeader.e_lfanew;
-
-            if (is64Bit)
-            {
-                // Update IMAGE_NT_HEADERS64
-                int importDirEntryOffset = ntHeaderOffset + 4 + Marshal.SizeOf<IMAGE_FILE_HEADER>() +
-                                          Marshal.OffsetOf<IMAGE_OPTIONAL_HEADER64>("DataDirectory").ToInt32() +
-                                          IMAGE_DIRECTORY_ENTRY_IMPORT * Marshal.SizeOf<IMAGE_DATA_DIRECTORY>();
-
-                WriteUInt32(peData, importDirEntryOffset, importDirRVA);
-                WriteUInt32(peData, importDirEntryOffset + 4, (uint)importData.Length);
-            }
-            else
-            {
-                // Update IMAGE_NT_HEADERS32
-                int importDirEntryOffset = ntHeaderOffset + 4 + Marshal.SizeOf<IMAGE_FILE_HEADER>() +
-                                          Marshal.OffsetOf<IMAGE_OPTIONAL_HEADER32>("DataDirectory").ToInt32() +
-                                          IMAGE_DIRECTORY_ENTRY_IMPORT * Marshal.SizeOf<IMAGE_DATA_DIRECTORY>();
-
-                WriteUInt32(peData, importDirEntryOffset, importDirRVA);
-                WriteUInt32(peData, importDirEntryOffset + 4, (uint)importData.Length);
-            }
-        }
-
-        private void WriteUInt32(byte[] data, int offset, uint value)
-        {
-            var bytes = BitConverter.GetBytes(value);
-            Array.Copy(bytes, 0, data, offset, 4);
-        }
-
-        /// <summary>
-        /// Convert byte array to structure
-        /// </summary>
-        private T BytesToStruct<T>(byte[] data, int offset = 0) where T : struct
-        {
-            int size = Marshal.SizeOf<T>();
-            if (offset + size > data.Length)
-                return default(T);
-
-            IntPtr ptr = Marshal.AllocHGlobal(size);
-            try
-            {
-                Marshal.Copy(data, offset, ptr, size);
-                return Marshal.PtrToStructure<T>(ptr);
-            }
-            finally
-            {
-                Marshal.FreeHGlobal(ptr);
-            }
-        }
-
-        /// <summary>
-        /// Read string from RVA in module data
-        /// </summary>
-        private string ReadStringFromRVA(byte[] moduleData, uint rva)
-        {
-            try
-            {
-                uint offset = RVAToFileOffset(moduleData, rva);
-                if (offset == 0) return null;
-
-                var sb = new StringBuilder();
-                for (int i = (int)offset; i < moduleData.Length; i++)
-                {
-                    if (moduleData[i] == 0) break;
-                    sb.Append((char)moduleData[i]);
-                }
-                return sb.ToString();
-            }
-            catch
-            {
-                return null;
-            }
-        }
-
-        /// <summary>
-        /// Check if export is named (not ordinal-only)
-        /// </summary>
-        private bool IsNamedExport(uint functionIndex, byte[] moduleData, uint ordinalsOffset, int nameCount)
-        {
-            try
-            {
-                for (int i = 0; i < nameCount; i++)
-                {
-                    ushort ordinalIndex = BitConverter.ToUInt16(moduleData, (int)ordinalsOffset + i * 2);
-                    if (ordinalIndex == functionIndex)
-                        return true;
-                }
-                return false;
-            }
-            catch
-            {
-                return false;
-            }
-        }
-
-        /// <summary>
-        /// Add export to database with proper address range tracking
-        /// </summary>
-        private void AddExport(ulong address, string moduleName, string functionName, uint ordinal)
-        {
-            var export = new ExportEntry
-            {
-                ModuleName = moduleName,
-                FunctionName = functionName,
-                Ordinal = ordinal
-            };
-
-            exports[address] = export;
-            exportAddresses.Add(address);
-
-            // Update address range for filtering
-            if (address < minAddress) minAddress = address;
-            if (address > maxAddress) maxAddress = address;
-        }
 
         // Helper classes
         private class ExportEntry

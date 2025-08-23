@@ -202,6 +202,22 @@ namespace KsDumper11.PE
         }
 
         [StructLayout(LayoutKind.Sequential)]
+        public struct IMAGE_EXPORT_DIRECTORY
+        {
+            public uint Characteristics;
+            public uint TimeDateStamp;
+            public ushort MajorVersion;
+            public ushort MinorVersion;
+            public uint Name;
+            public uint Base;
+            public uint NumberOfFunctions;
+            public uint NumberOfNames;
+            public uint AddressOfFunctions;
+            public uint AddressOfNames;
+            public uint AddressOfNameOrdinals;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
         public struct IMAGE_SECTION_HEADER
         {
             [MarshalAs(UnmanagedType.ByValArray, SizeConst = 8)]

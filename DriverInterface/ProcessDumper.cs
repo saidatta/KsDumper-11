@@ -1,5 +1,7 @@
 ﻿using System;
 using System.Diagnostics;
+using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using KsDumper11.Driver;
 using KsDumper11.PE;
@@ -565,7 +567,7 @@ namespace KsDumper11
 					VirtualAddress = newSectionRVA,
 					SizeOfRawData = 0x1000, // Aligned size
 					PointerToRawData = newSectionFileOffset,
-					Characteristics = 0x40000040 // IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ
+					Characteristics = (NativePEStructs.DataSectionFlags)0x40000040 // IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ
 				};
 
 				// Create new section with empty content
@@ -590,7 +592,7 @@ namespace KsDumper11
 
 					// Update image size
 					uint newImageSize = newSectionRVA + newSectionHeader.VirtualSize;
-					pe32.PEHeader.OptionalHeader32.SizeOfImage = newImageSize;
+					pe32.PEHeader.OptionalHeader.SizeOfImage = newImageSize;
 
 					Logger.Log("Updated PE32 headers: sections={0}, imageSize=0x{1:X}",
 						pe32.PEHeader.FileHeader.NumberOfSections, newImageSize);
@@ -602,7 +604,7 @@ namespace KsDumper11
 
 					// Update image size
 					uint newImageSize = newSectionRVA + newSectionHeader.VirtualSize;
-					pe64.PEHeader.OptionalHeader64.SizeOfImage = newImageSize;
+					pe64.PEHeader.OptionalHeader.SizeOfImage = newImageSize;
 
 					Logger.Log("Updated PE64 headers: sections={0}, imageSize=0x{1:X}",
 						pe64.PEHeader.FileHeader.NumberOfSections, newImageSize);
@@ -722,16 +724,16 @@ namespace KsDumper11
 				{
 					var pe32 = (PE32File)peFile;
 					// Update import directory in optional header
-					pe32.PEHeader.OptionalHeader32.DataDirectory[1].VirtualAddress = importInfo.RVA;
-					pe32.PEHeader.OptionalHeader32.DataDirectory[1].Size = importInfo.Size;
+					pe32.PEHeader.OptionalHeader.DataDirectory[1].VirtualAddress = importInfo.RVA;
+					pe32.PEHeader.OptionalHeader.DataDirectory[1].Size = importInfo.Size;
 					Logger.Log("Updated PE32 import directory pointers");
 				}
 				else if (peFile.Type == PEFile.PEType.PE64)
 				{
 					var pe64 = (PE64File)peFile;
 					// Update import directory in optional header
-					pe64.PEHeader.OptionalHeader64.DataDirectory[1].VirtualAddress = importInfo.RVA;
-					pe64.PEHeader.OptionalHeader64.DataDirectory[1].Size = importInfo.Size;
+					pe64.PEHeader.OptionalHeader.DataDirectory[1].VirtualAddress = importInfo.RVA;
+					pe64.PEHeader.OptionalHeader.DataDirectory[1].Size = importInfo.Size;
 					Logger.Log("Updated PE64 import directory pointers");
 				}
 

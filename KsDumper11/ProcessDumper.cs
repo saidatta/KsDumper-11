@@ -1,5 +1,7 @@
 ﻿using System;
 using System.Diagnostics;
+using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using KsDumper11.Driver;
 using KsDumper11.PE;
@@ -11,7 +13,7 @@ namespace KsDumper11
 	public class ProcessDumper
 	{
 		// Token: 0x0600002E RID: 46 RVA: 0x000038AD File Offset: 0x00001AAD
-		public ProcessDumper(DriverInterface kernelDriver)
+		public ProcessDumper(KsDumperDriverInterface kernelDriver)
 		{
 			this.kernelDriver = kernelDriver;
 		}
@@ -399,7 +401,7 @@ namespace KsDumper11
 		}
 
 		// Token: 0x0400002B RID: 43
-		private DriverInterface kernelDriver;
+		private KsDumperDriverInterface kernelDriver;
 
 		// Token: 0x02000023 RID: 35
 		internal static class NativeMethods
