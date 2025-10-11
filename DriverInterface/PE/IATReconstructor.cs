@@ -22,6 +22,8 @@ namespace KsDumper11.PE
         private ulong minAddress = ulong.MaxValue;
         private ulong maxAddress = 0;
 
+        private bool targetIs64Bit = true;
+
         public IATReconstructor(KsDumperDriverInterface driver)
         {
             exports = new Dictionary<ulong, ExportEntry>();
@@ -33,11 +35,15 @@ namespace KsDumper11.PE
         /// Main entry point - reconstructs IAT for dumped PE data
         /// CORRECTED: Uses target process address space for export database
         /// </summary>
-        public bool ReconstructIAT(byte[] peData, int targetProcessId, ulong imageBase, bool is64Bit)
+        public bool ReconstructIAT(ref byte[] peData, int targetProcessId, ulong imageBase, bool is64Bit)
         {
             try
             {
                 Logger.Log("Starting CORRECTED ProcessDump-style IAT reconstruction...");
+
+                // Remember target bitness for PEB parsing and scanning heuristics
+                targetIs64Bit = is64Bit;
+
                 Logger.Log("Target PID: {0}, Image Base: 0x{1:X}", targetProcessId, imageBase);
 
                 // Step 1: Build export database from TARGET process address space
@@ -59,7 +65,7 @@ namespace KsDumper11.PE
                 }
 
                 // Step 4: Build and integrate import directory
-                return BuildImportDirectory(peData, imports, is64Bit);
+                return BuildImportDirectory(ref peData, imports, is64Bit);
             }
             catch (Exception ex)
             {
@@ -188,6 +194,24 @@ namespace KsDumper11.PE
                 if (pebModules.Count > 0)
                 {
                     Logger.Log("Found {0} modules via PEB parsing", pebModules.Count);
+
+                    // Sanity check: WOW64 targets often miss modules via kernel path
+                    // Treat tiny module lists or no DLL-like names as suspicious regardless of bitness
+                    bool looksSuspicious = (pebModules.Count < 3)
+                        || !pebModules.Exists(m => m.Name != null && m.Name.IndexOf(".dll", StringComparison.OrdinalIgnoreCase) >= 0)
+                        || !pebModules.Exists(m => m.Name != null && m.Name.IndexOf("gameassembly.dll", StringComparison.OrdinalIgnoreCase) >= 0);
+
+                    if (looksSuspicious)
+                    {
+                        Logger.Log("Kernel PEB result looks incomplete; attempting user-mode PEB walk...");
+                        var userPeb = EnumerateModulesFromPEBUsermode(targetProcessId);
+                        if (userPeb.Count > pebModules.Count)
+                        {
+                            Logger.Log("User-mode PEB walk improved module count from {0} to {1}", pebModules.Count, userPeb.Count);
+                            return userPeb;
+                        }
+                    }
+
                     return pebModules;
                 }
 
@@ -256,14 +280,136 @@ namespace KsDumper11.PE
                     Logger.Log("Kernel driver returned no modules for process {0}", targetProcessId);
                 }
 
+                // Fallback: if kernel driver did not yield usable modules, try parsing PEB from user-mode
+                if (modules.Count == 0)
+                {
+                    Logger.Log("Kernel driver returned no usable modules; attempting user-mode PEB parsing...");
+                    var pebModules = EnumerateModulesFromPEBUsermode(targetProcessId);
+                    if (pebModules.Count > 0)
+                    {
+                        Logger.Log("User-mode PEB parsing found {0} modules", pebModules.Count);
+                        return pebModules;
+                    }
+                }
+
                 return modules;
             }
             catch (Exception ex)
             {
                 Logger.Log("Kernel PEB parsing failed: {0}", ex.Message);
+            }
+
+                // Final fallback: try user-mode PEB walk to enumerate modules (WOW64-safe)
+                try
+                {
+                    if (modules.Count == 0)
+                    {
+                        var pebModules = EnumerateModulesFromPEBUsermode(targetProcessId);
+                        if (pebModules.Count > 0)
+                        {
+                            Logger.Log("User-mode PEB parsing found {0} modules", pebModules.Count);
+                            return pebModules;
+                        }
+                    }
+                }
+                catch (Exception)
+                {
+                    // swallow and return what we have
+                }
+
                 return modules;
             }
-        }
+
+
+            /// <summary>
+            /// Manual PEB walk from user-mode reads, supports x86 and x64
+            /// </summary>
+            private List<TargetModuleInfo> EnumerateModulesFromPEBUsermode(int targetProcessId)
+            {
+                var result = new List<TargetModuleInfo>();
+                try
+                {
+                    // Get PEB address: kernel API for x64, NtQueryInformationProcess (Wow64) for x86
+                    ulong pebAddress = targetIs64Bit ? GetProcessPEBAddress(targetProcessId) : GetWow64PebAddress(targetProcessId);
+                    if (pebAddress == 0)
+                        return result;
+
+                    var pebData = ReadTargetProcessMemory(targetProcessId, pebAddress, 0x100);
+                    if (pebData == null)
+                        return result;
+
+                    ulong ldrAddress = targetIs64Bit ? BitConverter.ToUInt64(pebData, 0x18) : BitConverter.ToUInt32(pebData, 0x0C);
+
+                ulong GetWow64PebAddress(int pid)
+                {
+                    try
+                    {
+                        IntPtr hProcess = WinApi.OpenProcess(0x1000 /* PROCESS_QUERY_LIMITED_INFORMATION */, false, pid);
+                        if (hProcess == IntPtr.Zero)
+                            return 0;
+
+                        try
+                        {
+                            IntPtr peb32;
+                            int retLen;
+                            int status = WinApi.NtQueryInformationProcess(hProcess, 26 /* ProcessWow64Information */, out peb32, IntPtr.Size, out retLen);
+                            if (status == 0 && peb32 != IntPtr.Zero)
+                            {
+                                return (ulong)peb32.ToInt64();
+                            }
+                        }
+                        finally
+                        {
+                            WinApi.CloseHandle(hProcess);
+                        }
+                    }
+                    catch { }
+                    return 0;
+                }
+
+                    if (ldrAddress == 0)
+                        return result;
+
+                    // InLoadOrderModuleList offset: x64=0x10, x86=0x0C
+                    ulong listHead = ldrAddress + (targetIs64Bit ? 0x10UL : 0x0CUL);
+
+                    // Read first Flink
+                    int ptrSize = targetIs64Bit ? 8 : 4;
+                    var headData = ReadTargetProcessMemory(targetProcessId, listHead, ptrSize);
+                    if (headData == null || headData.Length < ptrSize)
+                        return result;
+
+                    ulong flink = targetIs64Bit ? BitConverter.ToUInt64(headData, 0) : BitConverter.ToUInt32(headData, 0);
+                    int safety = 0;
+                    while (flink != 0 && flink != listHead && safety++ < 512)
+                    {
+                        // LIST_ENTRY is first field in LDR_DATA_TABLE_ENTRY, so entry addr == flink
+                        ulong entryAddr = flink;
+
+                        var info = ParseLDRDataTableEntry(targetProcessId, entryAddr);
+                        if (info != null)
+                        {
+                            result.Add(info);
+                        }
+
+                        // Move to next: read Flink from current entry's LIST_ENTRY (offset 0)
+                        var entryHead = ReadTargetProcessMemory(targetProcessId, entryAddr, ptrSize);
+                        if (entryHead == null || entryHead.Length < ptrSize)
+                            break;
+                        flink = targetIs64Bit ? BitConverter.ToUInt64(entryHead, 0) : BitConverter.ToUInt32(entryHead, 0);
+                    }
+
+                    Logger.Log("User-mode PEB: Found {0} modules", result.Count);
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log("User-mode PEB parsing failed: {0}", ex.Message);
+                }
+
+                return result;
+            }
+
+
 
         /// <summary>
         /// REAL IMPLEMENTATION: Get PEB address using kernel driver's PsGetProcessPeb
@@ -304,7 +450,7 @@ namespace KsDumper11.PE
 
                 // Basic PEB validation
                 // Check if ImageBaseAddress points to a valid PE
-                ulong imageBase = BitConverter.ToUInt64(pebData, 0x10); // ImageBaseAddress offset
+                ulong imageBase = targetIs64Bit ? BitConverter.ToUInt64(pebData, 0x10) : BitConverter.ToUInt32(pebData, 0x08);
                 if (imageBase == 0) return false;
 
                 // Validate that ImageBaseAddress points to a PE header
@@ -315,7 +461,7 @@ namespace KsDumper11.PE
                 if (dosHeader[0] != 0x4D || dosHeader[1] != 0x5A) return false;
 
                 // Check if Ldr field points to a reasonable address
-                ulong ldrAddress = BitConverter.ToUInt64(pebData, 0x18); // Ldr offset
+                ulong ldrAddress = targetIs64Bit ? BitConverter.ToUInt64(pebData, 0x18) : BitConverter.ToUInt32(pebData, 0x0C);
                 if (ldrAddress == 0 || ldrAddress < 0x10000) return false;
 
                 Logger.Log("PEB validation successful at 0x{0:X}", address);
@@ -371,32 +517,47 @@ namespace KsDumper11.PE
                 var entryData = ReadTargetProcessMemory(targetProcessId, entryAddress, 0x120);
                 if (entryData == null || entryData.Length < 0x120) return null;
 
-                // LDR_DATA_TABLE_ENTRY structure offsets (x64):
-                // +0x000 InLoadOrderLinks         : _LIST_ENTRY
-                // +0x010 InMemoryOrderLinks      : _LIST_ENTRY
-                // +0x020 InInitializationOrderLinks : _LIST_ENTRY
-                // +0x030 DllBase                 : Ptr64 Void
-                // +0x038 EntryPoint              : Ptr64 Void
-                // +0x040 SizeOfImage             : Uint4B
-                // +0x048 FullDllName             : _UNICODE_STRING
-                // +0x058 BaseDllName             : _UNICODE_STRING
+                // LDR_DATA_TABLE_ENTRY structure offsets differ between x64 and x86
+                ulong dllBase;
+                uint sizeOfImage;
+                ushort nameLength;
+                ulong nameBuffer;
 
-                // Get DllBase (offset 0x30 in x64)
-                ulong dllBase = BitConverter.ToUInt64(entryData, 0x30);
+                if (targetIs64Bit)
+                {
+                    // x64 layout
+                    // +0x000 InLoadOrderLinks         : _LIST_ENTRY
+                    // +0x010 InMemoryOrderLinks       : _LIST_ENTRY
+                    // +0x020 InInitializationOrderLinks : _LIST_ENTRY
+                    // +0x030 DllBase                  : Ptr64 Void
+                    // +0x038 EntryPoint               : Ptr64 Void
+                    // +0x040 SizeOfImage              : Uint4B
+                    // +0x048 FullDllName              : _UNICODE_STRING
+                    // +0x058 BaseDllName              : _UNICODE_STRING
+                    dllBase = BitConverter.ToUInt64(entryData, 0x30);
+                    sizeOfImage = BitConverter.ToUInt32(entryData, 0x40);
+                    nameLength = BitConverter.ToUInt16(entryData, 0x58);
+                    nameBuffer = BitConverter.ToUInt64(entryData, 0x60);
+                }
+                else
+                {
+                    // x86 layout
+                    // +0x000 InLoadOrderLinks         : _LIST_ENTRY (8 bytes)
+                    // +0x008 InMemoryOrderLinks       : _LIST_ENTRY (8 bytes)
+                    // +0x010 InInitializationOrderLinks : _LIST_ENTRY (8 bytes)
+                    // +0x018 DllBase                  : Ptr32 Void
+                    // +0x01C EntryPoint               : Ptr32 Void
+                    // +0x020 SizeOfImage              : Uint4B
+                    // +0x02C BaseDllName              : _UNICODE_STRING (Length, Max, Buffer32)
+                    dllBase = BitConverter.ToUInt32(entryData, 0x18);
+                    sizeOfImage = BitConverter.ToUInt32(entryData, 0x20);
+                    nameLength = BitConverter.ToUInt16(entryData, 0x2C);
+                    uint nameBuf32 = BitConverter.ToUInt32(entryData, 0x30);
+                    nameBuffer = nameBuf32;
+                }
+
                 if (dllBase == 0) return null;
-
-                // Get SizeOfImage (offset 0x40 in x64)
-                uint sizeOfImage = BitConverter.ToUInt32(entryData, 0x40);
                 if (sizeOfImage == 0 || sizeOfImage > 500 * 1024 * 1024) return null; // Sanity check
-
-                // Get BaseDllName UNICODE_STRING (offset 0x58 in x64)
-                // UNICODE_STRING structure:
-                // +0x000 Length                  : Uint2B
-                // +0x002 MaximumLength           : Uint2B
-                // +0x008 Buffer                  : Ptr64 Wchar
-                ushort nameLength = BitConverter.ToUInt16(entryData, 0x58);
-                ushort nameMaxLength = BitConverter.ToUInt16(entryData, 0x5A);
-                ulong nameBuffer = BitConverter.ToUInt64(entryData, 0x60);
 
                 string moduleName = "unknown.dll";
                 if (nameLength > 0 && nameLength < 512 && nameBuffer != 0)
@@ -406,14 +567,9 @@ namespace KsDumper11.PE
                         var nameData = ReadTargetProcessMemory(targetProcessId, nameBuffer, nameLength);
                         if (nameData != null && nameData.Length >= nameLength)
                         {
-                            // Convert Unicode string to ASCII
                             moduleName = Encoding.Unicode.GetString(nameData, 0, nameLength);
-
-                            // Clean up the module name
-                            if (moduleName.Contains('\0'))
-                            {
-                                moduleName = moduleName.Substring(0, moduleName.IndexOf('\0'));
-                            }
+                            int nul = moduleName.IndexOf('\0');
+                            if (nul >= 0) moduleName = moduleName.Substring(0, nul);
                         }
                     }
                     catch
@@ -434,7 +590,7 @@ namespace KsDumper11.PE
                     BaseAddress = dllBase,
                     ProcessId = targetProcessId,
                     Size = sizeOfImage,
-                    Is64Bit = true // TODO: Detect architecture properly
+                    Is64Bit = targetIs64Bit
                 };
             }
             catch (Exception ex)
@@ -484,17 +640,29 @@ namespace KsDumper11.PE
             var modules = new List<TargetModuleInfo>();
 
             // MUCH smaller ranges - only scan where modules are actually likely to be
-            var targetedRanges = new[]
-            {
-                // Core system DLLs (reduced from 4GB to 512MB)
-                new { Start = 0x7FF800000000UL, End = 0x7FF820000000UL, Name = "Core System DLLs", Step = 0x10000UL },
+            var targetedRanges = targetIs64Bit
+                ? new[]
+                {
+                    // x64: Core system DLLs (reduced from 4GB to 512MB)
+                    new { Start = 0x7FF800000000UL, End = 0x7FF820000000UL, Name = "Core System DLLs", Step = 0x10000UL },
 
-                // Main executable (reduced from 256MB to 16MB)
-                new { Start = 0x140000000UL, End = 0x141000000UL, Name = "Main Executable", Step = 0x10000UL },
+                    // x64: Main executable (reduced from 256MB to 16MB)
+                    new { Start = 0x140000000UL, End = 0x141000000UL, Name = "Main Executable", Step = 0x10000UL },
 
-                // Additional common ranges
-                new { Start = 0x180000000UL, End = 0x181000000UL, Name = "Secondary Modules", Step = 0x10000UL }
-            };
+                    // x64: Additional common ranges
+                    new { Start = 0x180000000UL, End = 0x181000000UL, Name = "Secondary Modules", Step = 0x10000UL }
+                }
+                : new[]
+                {
+                    // x86: Core system DLLs (ntdll, kernel32, kernelbase, etc.)
+                    new { Start = 0x70000000UL, End = 0x78000000UL, Name = "Core System DLLs (x86)", Step = 0x10000UL },
+
+                    // x86: Main executable typical range
+                    new { Start = 0x00400000UL, End = 0x01000000UL, Name = "Main Executable (x86)", Step = 0x1000UL },
+
+                    // x86: Common game DLL range (Unity/IL2CPP like GameAssembly.dll)
+                    new { Start = 0x10000000UL, End = 0x40000000UL, Name = "Secondary Modules (x86)", Step = 0x10000UL }
+                };
 
             foreach (var range in targetedRanges)
             {
@@ -1035,8 +1203,8 @@ namespace KsDumper11.PE
 
                 // Get NT headers
                 int ntHeaderOffset = dosHeader.e_lfanew;
-                if (ntHeaderOffset + Marshal.SizeOf<IMAGE_NT_HEADERS64>() > moduleData.Length)
-                    return 0;
+                if (ntHeaderOffset + 24 > moduleData.Length)
+                    return 0; // Not enough for Signature + FileHeader
 
                 // Determine architecture and get export directory
                 IMAGE_DATA_DIRECTORY exportDir;
@@ -1044,11 +1212,15 @@ namespace KsDumper11.PE
 
                 if (magic == 0x20b) // PE32+
                 {
+                    if (ntHeaderOffset + Marshal.SizeOf<IMAGE_NT_HEADERS64>() > moduleData.Length)
+                        return 0;
                     var ntHeaders = ReadStruct<IMAGE_NT_HEADERS64>(moduleData, ntHeaderOffset);
                     exportDir = ntHeaders.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
                 }
                 else if (magic == 0x10b) // PE32
                 {
+                    if (ntHeaderOffset + Marshal.SizeOf<IMAGE_NT_HEADERS32>() > moduleData.Length)
+                        return 0;
                     var ntHeaders = ReadStruct<IMAGE_NT_HEADERS32>(moduleData, ntHeaderOffset);
                     exportDir = ntHeaders.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
                 }
@@ -1060,9 +1232,10 @@ namespace KsDumper11.PE
                 if (exportDir.VirtualAddress == 0 || exportDir.Size == 0)
                     return 0; // No exports
 
-                // Convert RVA to file offset
-                uint exportTableOffset = RVAToFileOffset(moduleData, exportDir.VirtualAddress);
-                if (exportTableOffset == 0) return 0;
+                // For memory images, RVA is the direct offset
+                uint exportTableOffset = exportDir.VirtualAddress;
+                if (exportTableOffset == 0 || exportTableOffset + (uint)Marshal.SizeOf<IMAGE_EXPORT_DIRECTORY>() > moduleData.Length)
+                    return 0;
 
                 var exportTable = ReadStruct<IMAGE_EXPORT_DIRECTORY>(moduleData, (int)exportTableOffset);
                 if (exportTable.NumberOfFunctions == 0) return 0;
@@ -1458,7 +1631,7 @@ namespace KsDumper11.PE
         /// <summary>
         /// REAL IMPLEMENTATION: Build complete import directory from discovered imports
         /// </summary>
-        private bool BuildImportDirectory(byte[] peData, List<ImportEntry> imports, bool is64Bit)
+        private bool BuildImportDirectory(ref byte[] peData, List<ImportEntry> imports, bool is64Bit)
         {
             try
             {
@@ -1481,7 +1654,7 @@ namespace KsDumper11.PE
                 Logger.Log("Import directory requires {0} bytes", importDirSize);
 
                 // Find space in PE file (expand last section)
-                uint importDirRVA = FindSpaceForImportDirectory(peData, importDirSize);
+                uint importDirRVA = FindSpaceForImportDirectory(ref peData, importDirSize, is64Bit);
                 if (importDirRVA == 0)
                 {
                     Logger.Log("Could not find space for import directory");
@@ -1562,7 +1735,7 @@ namespace KsDumper11.PE
         /// <summary>
         /// REAL IMPLEMENTATION: Find space for import directory by expanding last section
         /// </summary>
-        private uint FindSpaceForImportDirectory(byte[] peData, uint requiredSize)
+        private uint FindSpaceForImportDirectory(ref byte[] peData, uint requiredSize, bool is64Bit)
         {
             try
             {
@@ -1590,7 +1763,7 @@ namespace KsDumper11.PE
                 uint pointerToRawData = BitConverter.ToUInt32(peData, (int)lastSectionOffset + 20);
 
                 // Calculate where we can place the import directory
-                // Option 1: Try to place it at the end of the last section's virtual space
+                // Try to place it at the end of the last section's virtual space
                 uint candidateRVA = virtualAddress + virtualSize;
 
                 // Align to reasonable boundary (16 bytes)
@@ -1620,8 +1793,37 @@ namespace KsDumper11.PE
                 }
                 else
                 {
-                    Logger.Log("Not enough space in PE file for import directory");
-                    return 0;
+                    // Not enough space in the current file buffer — grow it and expand last section
+                    uint fileAlignment = GetFileAlignment(peData, is64Bit);
+                    uint newFileEnd = candidateFileOffset + requiredSize;
+                    uint newLength = (newFileEnd + (fileAlignment - 1)) & ~(fileAlignment - 1);
+
+                    Logger.Log("Growing PE buffer to {0} bytes to fit import directory", newLength);
+
+                    // Resize the underlying PE buffer
+                    Array.Resize(ref peData, (int)newLength);
+
+                    // Update the section's virtual and raw sizes
+                    uint newVirtualSize = (candidateRVA - virtualAddress) + requiredSize;
+                    BitConverter.GetBytes(newVirtualSize).CopyTo(peData, lastSectionOffset + 8);
+
+                    uint newRawSize = Math.Max(sizeOfRawData, (uint)(newLength - pointerToRawData));
+                    newRawSize = (newRawSize + (fileAlignment - 1)) & ~(fileAlignment - 1);
+                    BitConverter.GetBytes(newRawSize).CopyTo(peData, lastSectionOffset + 16);
+
+                    // Update SizeOfImage in optional header if needed
+                    uint sizeOfImageOffset = is64Bit ? (peOffset + 24 + 56u) : (peOffset + 24 + 56u);
+                    uint oldSizeOfImage = BitConverter.ToUInt32(peData, (int)sizeOfImageOffset);
+                    uint endOfSection = virtualAddress + newVirtualSize;
+                    if (endOfSection > oldSizeOfImage)
+                    {
+                        BitConverter.GetBytes(endOfSection).CopyTo(peData, (int)sizeOfImageOffset);
+                    }
+
+                    Logger.Log("Expanded last section and buffer: VirtualSize=0x{0:X}, SizeOfRawData=0x{1:X}",
+                        newVirtualSize, newRawSize);
+
+                    return candidateRVA;
                 }
             }
             catch (Exception ex)
@@ -1630,6 +1832,28 @@ namespace KsDumper11.PE
                 return 0;
             }
         }
+
+
+        /// <summary>
+        /// Get file alignment from PE optional header
+        /// </summary>
+        private uint GetFileAlignment(byte[] peData, bool is64Bit)
+        {
+            try
+            {
+                uint peOffset = BitConverter.ToUInt32(peData, 60);
+                uint alignmentOffset = peOffset + 24 + 36; // OptionalHeader.FileAlignment offset
+                if (alignmentOffset + 4 > peData.Length) return 0x200;
+                uint fileAlignment = BitConverter.ToUInt32(peData, (int)alignmentOffset);
+                if (fileAlignment == 0) fileAlignment = 0x200;
+                return fileAlignment;
+            }
+            catch
+            {
+                return 0x200;
+            }
+        }
+
 
         /// <summary>
         /// Get section alignment from PE optional header

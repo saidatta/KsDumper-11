@@ -49,5 +49,12 @@ namespace KsDumper11.Utility
 		public const uint PAGE_READWRITE = 0x04;
 
 
+		[DllImport("kernel32.dll", SetLastError = true)]
+		internal static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, int dwProcessId);
+
+		[DllImport("ntdll.dll")]
+		internal static extern int NtQueryInformationProcess(IntPtr ProcessHandle, int ProcessInformationClass, out IntPtr ProcessInformation, int ProcessInformationLength, out int ReturnLength);
+
+
     }
 }

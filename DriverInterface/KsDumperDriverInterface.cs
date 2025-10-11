@@ -251,11 +251,23 @@ namespace KsDumper11.Driver
 
                                 return modules;
                             }
+                            else if (outputHeader.status != 0)
+                            {
+                                // Log the actual NTSTATUS error code
+                                Utility.Logger.Log("Kernel driver GetProcessModules failed with NTSTATUS: 0x{0:X8} (moduleCount={1})",
+                                    outputHeader.status, outputHeader.moduleCount);
+                            }
                         }
                         finally
                         {
                             Marshal.FreeHGlobal(outputHeaderPtr);
                         }
+                    }
+                    else
+                    {
+                        int lastError = Marshal.GetLastWin32Error();
+                        Utility.Logger.Log("DeviceIoControl failed or returned insufficient data (success={0}, bytesReturned={1}, expected>={2}, GetLastError=0x{3:X8})",
+                            success, bytesReturned, outputHeaderSize, lastError);
                     }
 
                     return new Operations.KERNEL_MODULE_INFO[0];

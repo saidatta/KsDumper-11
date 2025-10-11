@@ -119,12 +119,14 @@ NTSTATUS GetProcessModules(INT32 targetProcessId, PKERNEL_MODULE_INFO modules, I
 
 	if (!NT_SUCCESS(status))
 	{
+		DbgPrintEx(0, 0, "[KsDumper] GetProcessModules: PsLookupProcessByProcessId failed for PID %d, status=0x%X\n", targetProcessId, status);
 		return status;
 	}
 
 	// CRITICAL: Check IRQL level
 	if (KeGetCurrentIrql() > PASSIVE_LEVEL)
 	{
+		DbgPrintEx(0, 0, "[KsDumper] GetProcessModules: IRQL too high for PID %d\n", targetProcessId);
 		ObDereferenceObject(targetProcess);
 		return STATUS_INVALID_DEVICE_REQUEST;
 	}
@@ -132,6 +134,7 @@ NTSTATUS GetProcessModules(INT32 targetProcessId, PKERNEL_MODULE_INFO modules, I
 	PPEB peb = PsGetProcessPeb(targetProcess);
 	if (peb == NULL)
 	{
+		DbgPrintEx(0, 0, "[KsDumper] GetProcessModules: PEB is NULL for PID %d\n", targetProcessId);
 		ObDereferenceObject(targetProcess);
 		return STATUS_NOT_FOUND;
 	}
@@ -152,6 +155,7 @@ NTSTATUS GetProcessModules(INT32 targetProcessId, PKERNEL_MODULE_INFO modules, I
 		PPEB_LDR_DATA ldr = peb64->Ldr;
 		if (ldr == NULL)
 		{
+			DbgPrintEx(0, 0, "[KsDumper] GetProcessModules: PEB.Ldr is NULL for PID %d\n", targetProcessId);
 			status = STATUS_NOT_FOUND;
 			__leave;
 		}
@@ -159,10 +163,47 @@ NTSTATUS GetProcessModules(INT32 targetProcessId, PKERNEL_MODULE_INFO modules, I
 		// CRITICAL: Probe LDR_DATA before access
 		ProbeForRead(ldr, sizeof(PEB_LDR_DATA), sizeof(ULONG_PTR));
 
+		// FIXED: Wait for loader initialization (like ProcessLister.c does)
+		if (!ldr->Initialized)
+		{
+			DbgPrintEx(0, 0, "[KsDumper] GetProcessModules: Loader not initialized for PID %d, waiting...\n", targetProcessId);
+			int initLoadCount = 0;
+			while (!ldr->Initialized && initLoadCount++ < 4)
+			{
+				// Detach, sleep, reattach
+				KeUnstackDetachProcess(&apcState);
+				LARGE_INTEGER interval;
+				interval.QuadPart = -2500000LL; // 250ms in 100ns units (negative = relative)
+				KeDelayExecutionThread(KernelMode, FALSE, &interval);
+				KeStackAttachProcess(targetProcess, &apcState);
+
+				// Re-probe after reattach
+				ProbeForRead(peb, sizeof(PEB64), sizeof(ULONG_PTR));
+				ldr = peb64->Ldr;
+				if (ldr == NULL)
+				{
+					DbgPrintEx(0, 0, "[KsDumper] GetProcessModules: PEB.Ldr became NULL after retry for PID %d\n", targetProcessId);
+					status = STATUS_NOT_FOUND;
+					__leave;
+				}
+				ProbeForRead(ldr, sizeof(PEB_LDR_DATA), sizeof(ULONG_PTR));
+			}
+
+			// If still not initialized after retries, fail
+			if (!ldr->Initialized)
+			{
+				DbgPrintEx(0, 0, "[KsDumper] GetProcessModules: Loader still not initialized after retries for PID %d\n", targetProcessId);
+				status = STATUS_NOT_FOUND;
+				__leave;
+			}
+			DbgPrintEx(0, 0, "[KsDumper] GetProcessModules: Loader initialized after waiting for PID %d\n", targetProcessId);
+		}
+
 		// Walk InLoadOrderModuleList with proper validation
 		PLIST_ENTRY moduleList = &ldr->InLoadOrderModuleList;
 		if (moduleList == NULL)
 		{
+			DbgPrintEx(0, 0, "[KsDumper] GetProcessModules: InLoadOrderModuleList is NULL for PID %d\n", targetProcessId);
 			status = STATUS_NOT_FOUND;
 			__leave;
 		}
@@ -172,6 +213,8 @@ NTSTATUS GetProcessModules(INT32 targetProcessId, PKERNEL_MODULE_INFO modules, I
 
 		PLIST_ENTRY currentEntry = moduleList->Flink;
 		ULONG iterationCount = 0;
+
+		DbgPrintEx(0, 0, "[KsDumper] GetProcessModules: Starting module enumeration for PID %d\n", targetProcessId);
 
 		while (currentEntry != NULL && currentEntry != moduleList && *moduleCount < maxModules)
 		{
@@ -224,6 +267,7 @@ NTSTATUS GetProcessModules(INT32 targetProcessId, PKERNEL_MODULE_INFO modules, I
 		}
 
 		status = STATUS_SUCCESS;
+		DbgPrintEx(0, 0, "[KsDumper] GetProcessModules: Successfully enumerated %d modules for PID %d\n", *moduleCount, targetProcessId);
 	}
 	__except(GetExceptionCode() == STATUS_ACCESS_VIOLATION ||
 			 GetExceptionCode() == STATUS_INVALID_ADDRESS ||
@@ -235,6 +279,8 @@ NTSTATUS GetProcessModules(INT32 targetProcessId, PKERNEL_MODULE_INFO modules, I
 	{
 		// FIXED: Handle multiple relevant exception types
 		status = GetExceptionCode();
+		DbgPrintEx(0, 0, "[KsDumper] GetProcessModules: Exception 0x%X while enumerating modules for PID %d (found %d modules before exception)\n",
+			status, targetProcessId, *moduleCount);
 	}
 
 	// CRITICAL: Always detach from process

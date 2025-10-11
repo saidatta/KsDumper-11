@@ -83,7 +83,7 @@ namespace KsDumper11
 					ulong imageBase = (ulong)basePointer.ToInt64();
 
 					// CRITICAL: Pass target process ID for correct address space
-					bool iatFixed = iatReconstructor.ReconstructIAT(peBytes, processSummary.Id, imageBase, is64Bit);
+					bool iatFixed = iatReconstructor.ReconstructIAT(ref peBytes, processSummary.Id, imageBase, is64Bit);
 					if (iatFixed)
 					{
 						Logger.Log("IAT reconstruction successful!", Array.Empty<object>());
@@ -161,7 +161,7 @@ namespace KsDumper11
 					ulong imageBase = (ulong)basePointer.ToInt64();
 
 					// CRITICAL: Pass target process ID for correct address space
-					bool iatFixed = iatReconstructor.ReconstructIAT(peBytes, processSummary.ProcessId, imageBase, is64Bit);
+					bool iatFixed = iatReconstructor.ReconstructIAT(ref peBytes, processSummary.ProcessId, imageBase, is64Bit);
 					if (iatFixed)
 					{
 						Logger.Log("IAT reconstruction successful!", Array.Empty<object>());
